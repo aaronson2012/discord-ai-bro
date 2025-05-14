@@ -1,1 +1,1 @@
-# discord-ai-bro
+Shoot the shit with the AI.
