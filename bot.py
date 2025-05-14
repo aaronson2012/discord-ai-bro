@@ -24,6 +24,9 @@ from google.api_core.exceptions import (
 from supabase import create_client, Client
 from typing import List, Dict, Optional, Callable
 import threading
+import http.server
+import socketserver
+from concurrent.futures import ThreadPoolExecutor
 
 # Load environment variables
 load_dotenv(override=True)
@@ -2429,6 +2432,11 @@ async def shutdown(signal_received=None):
             logger.info("Closing Discord client connection...")
             await client.close()
 
+        # Shutdown health check server if it exists
+        if 'health_server' in globals() and health_server:
+            logger.info("Shutting down health check server...")
+            health_server.shutdown()
+
         # Clear sensitive data from memory
         logger.info("Clearing sensitive data from memory...")
         if 'env_config' in globals():
@@ -2513,6 +2521,53 @@ def setup_signal_handlers():
 
 
 
+# --- Health Check HTTP Server ---
+class HealthCheckHandler(http.server.BaseHTTPRequestHandler):
+    """HTTP request handler for health checks"""
+
+    def _set_headers(self, status_code=200):
+        self.send_response(status_code)
+        self.send_header('Content-type', 'application/json')
+        self.end_headers()
+
+    def do_GET(self):
+        if self.path == '/health':
+            try:
+                # Get health status from the health monitor
+                status_data = asyncio.run(health_monitor.get_status())
+
+                # Return health status as JSON
+                self._set_headers()
+                self.wfile.write(json.dumps(status_data).encode())
+            except Exception as e:
+                logger.error(f"Error in health check endpoint: {e}")
+                self._set_headers(500)
+                self.wfile.write(json.dumps({"status": "error", "error": str(e)}).encode())
+        else:
+            self._set_headers(404)
+            self.wfile.write(json.dumps({"status": "error", "error": "Not found"}).encode())
+
+    def log_message(self, format, *args):
+        """Override to use our logger instead of printing to stderr"""
+        logger.debug(f"Health server: {self.address_string()} - {format % args}")
+
+def start_health_server(port=8080):
+    """Start the health check HTTP server in a separate thread"""
+    try:
+        # Create a ThreadPoolExecutor for the HTTP server
+        server = socketserver.ThreadingTCPServer(("", port), HealthCheckHandler)
+        logger.info(f"Starting health check server on port {port}")
+
+        # Start the server in a separate thread
+        server_thread = threading.Thread(target=server.serve_forever)
+        server_thread.daemon = True  # Set as daemon so it will be killed when the main thread exits
+        server_thread.start()
+
+        return server
+    except Exception as e:
+        logger.error(f"Failed to start health check server: {e}")
+        return None
+
 # --- Main Execution Block ---
 if __name__ == "__main__":
     # Configure logging
@@ -2522,6 +2577,9 @@ if __name__ == "__main__":
     # Set up signal handlers
     setup_signal_handlers()
     logger.info("Signal handlers configured for graceful shutdown")
+
+    # Start health check server
+    health_server = start_health_server()
 
     # Validate configuration
     if env_config.validate_config():
